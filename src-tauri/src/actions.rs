@@ -57,6 +57,18 @@ fn strip_invisible_chars(s: &str) -> String {
     s.replace(['\u{200B}', '\u{200C}', '\u{200D}', '\u{FEFF}'], "")
 }
 
+/// Strip ASCII control characters that could be destructive when pasted.
+///
+/// Characters 0x00–0x1F and 0x7F (DEL) are removed. These can cause:
+/// - Terminal closure (Ctrl+D / EOF signal)
+/// - Process interrupts (Ctrl+C)
+/// - Suspended processes (Ctrl+Z)
+/// - Escape sequences (ESC)
+/// - Backspace / delete altering existing text (BS, DEL)
+fn sanitize_control_chars(s: &str) -> String {
+    s.chars().filter(|c| !c.is_control()).collect()
+}
+
 /// Build a system prompt from the user's prompt template.
 /// Removes `${output}` placeholder since the transcription is sent as the user message.
 fn build_system_prompt(prompt_template: &str) -> String {
@@ -605,7 +617,9 @@ impl ShortcutAction for TranscribeAction {
                             } else {
                                 let ah_clone = ah.clone();
                                 let paste_time = Instant::now();
-                                let final_text = processed.final_text;
+                                let final_text = sanitize_control_chars(&strip_invisible_chars(
+                                    &processed.final_text,
+                                ));
                                 ah.run_on_main_thread(move || {
                                     match utils::paste(final_text, ah_clone.clone()) {
                                         Ok(()) => debug!(
@@ -719,3 +733,59 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
     );
     map
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_control_chars_removes_ctrl_d() {
+        // Ctrl+D (0x04) closes terminal shells at prompt
+        assert_eq!(sanitize_control_chars("hello\x04world"), "helloworld");
+    }
+
+    #[test]
+    fn test_sanitize_control_chars_removes_ctrl_c() {
+        assert_eq!(sanitize_control_chars("hello\x03world"), "helloworld");
+    }
+
+    #[test]
+    fn test_sanitize_control_chars_removes_escape() {
+        assert_eq!(sanitize_control_chars("hello\x1bworld"), "helloworld");
+    }
+
+    #[test]
+    fn test_sanitize_control_chars_removes_del() {
+        assert_eq!(sanitize_control_chars("hello\x7Fworld"), "helloworld");
+    }
+
+    #[test]
+    fn test_sanitize_control_chars_removes_null() {
+        assert_eq!(sanitize_control_chars("hello\x00world"), "helloworld");
+    }
+
+    #[test]
+    fn test_sanitize_control_chars_removes_newline_and_tab() {
+        assert_eq!(sanitize_control_chars("hello\n\tworld"), "helloworld");
+    }
+
+    #[test]
+    fn test_sanitize_control_chars_preserves_normal_text() {
+        assert_eq!(
+            sanitize_control_chars("Hello, world! 123 @#$%"),
+            "Hello, world! 123 @#$%"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_control_chars_empty_string() {
+        assert_eq!(sanitize_control_chars(""), "");
+    }
+
+    #[test]
+    fn test_sanitize_control_chars_all_control_chars() {
+        // Test every control character 0x00-0x1F and 0x7F
+        let input: String = (0..=0x1F).map(|i| i as u8 as char).chain(std::iter::once('\x7F')).collect();
+        assert_eq!(sanitize_control_chars(&input), "");
+    }
+}
